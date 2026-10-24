@@ -104,6 +104,8 @@ done
 
 - 01〜06 は `CREATE OR REPLACE` なので何度でも再実行できます。再実行した場合は **07 も再実行**して権限を付け直してください（08 の PAT はそのまま使えます）。
 - Tokyo などで Agent のモデルが使えない場合に備え、00 で `CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION'` を設定しています。
+- **トライアルアカウントで動作確認済み**（Enterprise / AWS US East 2）：00〜08 をそのまま実行し、Managed MCP 経由（PAT）で Agent が回答することを確認しています。SPCS やコンテナは使わないため、トライアルの制限には該当しません。
+- トライアルに SSO が無い場合、CLI の `externalbrowser` 認証は使えません。キーペア認証（`ALTER USER ... SET RSA_PUBLIC_KEY`）で接続してください。
 
 ## MCP 接続情報（Veeva 側に案内する内容）
 
