@@ -1,19 +1,26 @@
-# Veeva CRM × Snowflake Cortex Agent（Managed MCP）製薬コマーシャル デモ
+# Veeva CRM × Snowflake Cortex Agent 製薬コマーシャル デモ
 
 製薬会社の MR（営業）が **Veeva CRM の医師ページから** Snowflake の Cortex Agent を呼び出し、
 「この先生の売上は？」「前回の面談で何を懸念していた？」のように **先生の名前を言わずに** 質問できるデモです。
-Agent は **Snowflake Managed MCP Server** で公開しているため、MCP クライアント（Veeva Vault CRM の MCP Client など）からそのまま呼び出せます。
+
+Agent は次の3通りで呼び出せます。
+
+| 方式 | 呼び出し元 | このリポジトリ |
+|---|---|---|
+| **iFrame（Web アプリ）** | Vault CRM の HTML テンプレートに埋め込んだ Web アプリ | `webapp/app.py`（[Veeva 向け実装ガイド](#veeva-向け実装ガイドiframe-方式)） |
+| **REST API** | 任意のサーバー（Cortex Agents REST API） | `webapp/app.py` の呼び出し部分を参照 |
+| **MCP** | MCP クライアント（Snowflake Managed MCP Server） | `sql/06_mcp_server.sql`, `tests/mcp_smoke_test.py` |
 
 > データはすべて架空のダミーデータです（医師・施設・製品・金額は実在しません）。
 
-## アーキテクチャ
+## アーキテクチャ（Snowflake 側）
 
 ```
-Veeva Vault CRM（医師ページ）
-  │  MCP Client: tools/call "pharma-mr-assistant"
+Veeva Vault CRM（医師ページ）／ Web アプリ／ MCP クライアント
+  │  REST API: agents/PHARMA_MR_ASSISTANT:run  または  MCP: tools/call "pharma-mr-assistant"
   │  text = "[VEEVA_CONTEXT] veeva_account_id=001JP00000HCP00010 mr_email=...\n<MR の質問>"
   ▼
-Snowflake Managed MCP Server  VEEVA_PHARMA_DEMO_DB.AGENTS.PHARMA_MR_MCP_SERVER
+（MCP の場合）Snowflake Managed MCP Server  VEEVA_PHARMA_DEMO_DB.AGENTS.PHARMA_MR_MCP_SERVER
   │  （認証: PAT ／ Snowflake OAuth ／ External OAuth）
   ▼
 Cortex Agent  VEEVA_PHARMA_DEMO_DB.AGENTS.PHARMA_MR_ASSISTANT
@@ -30,7 +37,7 @@ Analyst / Search / プロシージャは Agent の裏側で実行させていま
 
 ### 先生コンテキストの渡し方（名前を言わせない仕組み）
 
-Veeva の医師ページは表示中の先生の **Veeva Account ID** を持っているため、MCP 呼び出し時にメッセージ先頭へ付与します。
+Veeva の医師ページは表示中の先生の **Veeva Account ID** を持っているため、Agent を呼ぶときにメッセージの先頭へ付けます（REST・MCP 共通）。
 
 ```
 [VEEVA_CONTEXT] veeva_account_id=001JP00000HCP00010 mr_email=mr008@demo-pharma.example.com
@@ -40,7 +47,7 @@ Veeva の医師ページは表示中の先生の **Veeva Account ID** を持っ�
 - Agent は最初に `hcp_context` を ID で呼び、先生を確定してから回答します（Analyst への問い合わせも ID で絞り込む）。
 - ID が無い場合は氏名でフォールバックします。同姓同名（デモでは「田中 誠」を意図的に2名用意）の場合は候補を提示して確認します。
 - `mr_email` を渡すと「自分の担当先」などの質問を MR 本人で絞り込みます（任意）。
-- 2ターン目以降は MCP ツールの `thread_id` / `parent_message_id` を渡すと会話が継続します。
+- 会話を続ける場合は、MCP ではツールの `thread_id` / `parent_message_id` を渡します。REST API では会話履歴を `messages` にまとめて送るか、`thread_id` と `parent_message_id` を使います。
 
 ## データモデル（`VEEVA_PHARMA_DEMO_DB.COMMERCIAL`）
 
@@ -161,6 +168,7 @@ curl -X POST "$SNOWFLAKE_ACCOUNT_URL/api/v2/databases/VEEVA_PHARMA_DEMO_DB/schem
 ```
 sql/       構築スクリプト（番号順に実行）
 tests/     MCP 疎通テスト（mcp_smoke_test.py）
+webapp/    iFrame 用チャットウィジェット（app.py）
 ```
 
 ## 参考
@@ -168,3 +176,74 @@ tests/     MCP 疎通テスト（mcp_smoke_test.py）
 - [Snowflake-managed MCP server](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp)
 - [CREATE MCP SERVER](https://docs.snowflake.com/en/sql-reference/sql/create-mcp-server)
 - [Cortex Agents](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents)
+
+## Veeva 向け実装ガイド（iFrame 方式）
+
+Vault CRM の医師ページに HTML テンプレート（iFrame）でチャット画面を埋め込み、その裏で Web アプリが Cortex Agents REST API を呼ぶ構成です。
+`webapp/app.py` は Python 標準ライブラリだけで動くサンプル実装です。言語・画面デザインは自由に変更してかまいません。
+
+### 全体の流れ
+
+```
+MR ──① 医師ページを開く──▶ Vault CRM（HTML テンプレート）
+                             │ ② iFrame: https://<アプリ>/?account_id=<表示中の医師ID>&mr=<MRメール>
+                             ▼
+                     Web アプリ（Veeva 側でホスト）
+                       ├ チャット画面（ブラウザ）   ※PAT はブラウザに渡さない
+                       └ サーバー ──③ REST API（Bearer PAT）──▶ Snowflake Cortex Agent
+                                  ◀──④ 回答（JSON）────────────┘
+```
+
+### Snowflake 側から受け取るもの
+
+| 項目 | 内容 | 受け渡し方法 |
+|---|---|---|
+| アカウント URL | `https://<orgname>-<account_name>.snowflakecomputing.com` | メールなど |
+| PAT | サービスユーザー `VEEVA_PHARMA_DEMO_MCP_USER` の PAT（読み取り専用ロールに限定・有効期限あり） | **GitHub やメール本文には載せず、別の経路で受け渡す** |
+| ロール / ウェアハウス | `VEEVA_PHARMA_DEMO_MCP_ROLE` / `VEEVA_PHARMA_DEMO_WH`（`app.py` の既定値） | この README |
+| テスト用医師 ID | `001JP00000HCP00010`（加藤 直樹 先生） | この README |
+
+### アプリが守る仕様（Snowflake の呼び出し部分）
+
+1. **エンドポイント**: `POST {アカウントURL}/api/v2/databases/VEEVA_PHARMA_DEMO_DB/schemas/AGENTS/agents/PHARMA_MR_ASSISTANT:run`
+2. **ヘッダー**: `Authorization: Bearer <PAT>`, `X-Snowflake-Role: VEEVA_PHARMA_DEMO_MCP_ROLE`, `Content-Type: application/json`, `Accept: application/json`
+3. **本文**: 最初のユーザー発言の先頭に医師コンテキストを付けます。`"stream": false` で回答が1つの JSON で返ります。
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": [{"type": "text",
+      "text": "[VEEVA_CONTEXT] veeva_account_id=001JP00000HCP00010 mr_email=mr008@demo-pharma.example.com\n直近12ヶ月の製品別実績は？"}]}
+  ],
+  "stream": false
+}
+```
+
+4. **回答**: レスポンスの `content` のうち `type: "text"` の要素の `text`（Markdown）を表示します。
+5. **PAT はサーバー側の環境変数・シークレットにだけ置き**、ブラウザ・HTML・ログには出さないでください。
+
+### サンプル実装（webapp/app.py）の起動
+
+```bash
+SNOWFLAKE_ACCOUNT_URL=https://<orgname>-<account_name>.snowflakecomputing.com \
+SNOWFLAKE_PAT=<PAT> FRAME_ANCESTORS="https://<Vault のドメイン>" PORT=8080 \
+python webapp/app.py
+```
+
+| 環境変数 | 必須 | 内容 |
+|---|---|---|
+| `SNOWFLAKE_ACCOUNT_URL` | ○ | アカウント URL |
+| `SNOWFLAKE_PAT` | ○ | PAT |
+| `FRAME_ANCESTORS` | 推奨 | iFrame での表示を許可する親ページ（既定 `*`。本番では Vault のドメインに限定） |
+| `SNOWFLAKE_ROLE` / `SNOWFLAKE_WAREHOUSE` | | 既定は `VEEVA_PHARMA_DEMO_MCP_ROLE` / `VEEVA_PHARMA_DEMO_WH` |
+| `PORT` | | 待ち受けポート（既定 8080） |
+
+- iFrame に埋め込む URL: `https://<アプリ>/?account_id=<Veeva Account ID>&mr=<MR メール>&mr_name=<MR 名>`
+- Vault の画面は HTTPS なので、アプリも **HTTPS で公開** してください。
+- サイズの目安は幅 400px × 高さ 650px 程度です。
+- 1回の回答に数十秒かかることがあります（デモでは回答をまとめて表示しています）。
+
+### 本番に向けて
+
+- PAT は全 MR 共通のサービスユーザーです。本番では OAuth（External OAuth など）への切り替えと、送信元 IP を限定するネットワークポリシーを検討してください。
+- MR ごとに見えるデータを強制したい場合は、Agent 実行時の `variables`（変更不可のセッション属性）と行アクセスポリシーを組み合わせます（このデモには未実装）。
